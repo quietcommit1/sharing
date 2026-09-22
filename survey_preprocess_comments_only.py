@@ -126,8 +126,8 @@ def main(args):
     from google.cloud import storage
 
     pattern = re.compile(args.file_name)
-    date_columns = [c.strip() for c in args.date_columns.split(';') if c.strip()]
-    datetime_columns = [c.strip() for c in args.datetime_columns.split(';') if c.strip()]
+    date_columns = [c.strip() for c in args.date_columns.split(',') if c.strip()]
+    datetime_columns = [c.strip() for c in args.datetime_columns.split(',') if c.strip()]
     landing_bucket = storage.Client(project=args.landing_project).bucket(args.landing_bucket)
     archive_bucket = storage.Client(project=args.staging_project).bucket(args.archive_bucket)
     jobs = []
@@ -173,6 +173,6 @@ if __name__ == '__main__':
     parser.add_argument('--landing_bucket', required=True)
     parser.add_argument('--archive_bucket', required=True)
     parser.add_argument('--file_name', required=True, help='Regular expression matching Excel object names')
-    parser.add_argument('--date_columns', default='', help='Semicolon-separated headers to format as YYYY-MM-DD')
-    parser.add_argument('--datetime_columns', default='', help='Semicolon-separated headers to format as YYYY-MM-DD HH:MM:SS')
+    parser.add_argument('--date_columns', default='', help='Comma-separated headers to format as YYYY-MM-DD')
+    parser.add_argument('--datetime_columns', default='', help='Comma-separated headers to format as YYYY-MM-DD HH:MM:SS')
     main(parser.parse_args())
