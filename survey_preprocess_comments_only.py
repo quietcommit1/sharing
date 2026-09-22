@@ -20,6 +20,8 @@ def sanitize_comment_value(value):
     text = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', text)
     # Handle runs of any length, including overlapping delimiters (|||).
     text = re.sub(r'\|{2,}', lambda match: ' '.join(match.group()), text)
+    # One input quote becomes exactly one output quote. Never CSV-unescape
+    # doubled quotes or strip enclosing quotes: Excel already supplies cell text.
     text = text.replace('"', '\u201d').strip()
     # Keep a trailing pipe separate from the next field separator.
     return text + ' ' if text.endswith('|') else text
@@ -68,7 +70,7 @@ def csv_from_excel(file_info, specific_text='No filters applied', date_columns=(
         sheet = wb.active
         headers = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))
         comments = {i for i, value in enumerate(headers)
-                    if value is not None and str(value).strip().upper().endswith('_COMMENTS')}
+                    if value is not None and str(value).strip().upper().endswith(('_COMMENT', '_COMMENTS'))}
         dates = resolve_target_column_indices(headers, date_columns)
         datetimes = resolve_target_column_indices(headers, datetime_columns)
         if dates & datetimes:
@@ -88,7 +90,17 @@ def csv_from_excel(file_info, specific_text='No filters applied', date_columns=(
                     mode = 'datetime' if i in datetimes else 'date' if i in dates else None
                     text = format_value(value, mode)
                     if i in comments:
+                        original_text = '' if value is None else str(value)
                         text = sanitize_comment_value(text)
+                        # Compare with the actual Excel cell, not a CSV-rendered copy.
+                        # Preserve existing curly quotes and every ASCII quote one-for-one.
+                        expected_quotes = re.findall(r'["\u201c\u201d]', original_text.replace('"', '\u201d'))
+                        actual_quotes = re.findall(r'["\u201c\u201d]', text)
+                        if actual_quotes != expected_quotes:
+                            cell = f'{sheet.title}!{openpyxl.utils.get_column_letter(i + 1)}{row_number}'
+                            raise ValueError(f'Quote preservation failed at {cell}: expected '
+                                             f'{len(expected_quotes)} quotes, got {len(actual_quotes)}. '
+                                             'Original file retained.')
                     elif (UNSAFE.search(text) or DELIMITER in text
                           or (i < len(values) - 1 and text.endswith('|'))):
                         cell = f'{sheet.title}!{openpyxl.utils.get_column_letter(i + 1)}{row_number}'
