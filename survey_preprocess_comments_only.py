@@ -9,6 +9,9 @@ import openpyxl
 
 
 DELIMITER = '||'
+# Build a reusable detection pattern; this does not replace any text.
+# The ranges cover control characters; the final entries cover Unicode line/
+# paragraph separators and the ASCII double quote used by the CSV reader.
 UNSAFE = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029"]')
 
 
@@ -16,14 +19,35 @@ def sanitize_comment_value(value):
     if value is None:
         return ''
     text = str(value)
+    # re.sub(pattern, replacement, text) replaces every matching piece of text.
+    # r'...' keeps backslashes literal for the regular-expression engine.
+    # [...] matches any listed character; + groups consecutive matches together.
+    # \r = carriage return, \n = newline, \t = tab.
+    # \x85 = Unicode next-line character; \u2028 = line separator;
+    # \u2029 = paragraph separator. These can arrive in copied text.
+    # Replace each consecutive group with ONE ordinary space, so a comment
+    # stays on one output line. Example: 'Hello\r\nworld' becomes 'Hello world'.
     text = re.sub(r'[\r\n\t\x85\u2028\u2029]+', ' ', text)
+    # Replace remaining control characters with spaces: \x00-\x1f includes
+    # NUL, backspace and form feed; \x7f-\x9f includes DEL and C1 controls.
+    # These are control codes, not ordinary letters, punctuation or emojis.
+    # There is no + here: EACH matched character becomes one space.
     text = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', text)
-    # Handle runs of any length, including overlapping delimiters (|||).
+    # \| matches a literal pipe; {2,} means two or more consecutive pipes.
+    # match.group() is the matched pipe sequence. ' '.join(...) inserts a
+    # space between its characters: '|||' becomes '| | |'. No pipe is removed.
+    # This prevents comment text from looking like the || column separator.
+    # A single pipe inside a comment is left alone.
     text = re.sub(r'\|{2,}', lambda match: ' '.join(match.group()), text)
     # One input quote becomes exactly one output quote. Never CSV-unescape
     # doubled quotes or strip enclosing quotes: Excel already supplies cell text.
+    # replace changes every ASCII double quote to the Unicode right double
+    # quote (\u201d), so it is not interpreted as CSV quoting.
+    # strip() then removes whitespace ONLY at the start/end, not quotes
+    # or spaces between words. Existing curly quotes remain unchanged.
     text = text.replace('"', '\u201d').strip()
-    # Keep a trailing pipe separate from the next field separator.
+    # Add one space after a trailing pipe so it cannot join the next ||
+    # separator. Example: field 'end|' becomes 'end| ' before joining fields.
     return text + ' ' if text.endswith('|') else text
 
 
@@ -32,6 +56,8 @@ def format_value(value, mode=None):
         return ''
     if mode is None:
         return str(value)
+    # Format codes: %Y = four-digit year, %m = month, %d = day,
+    # %H = 24-hour hour, %M = minute, %S = second.
     target = '%Y-%m-%d %H:%M:%S' if mode == 'datetime' else '%Y-%m-%d'
     if isinstance(value, (datetime.datetime, datetime.date)):
         return value.strftime(target)
@@ -40,6 +66,8 @@ def format_value(value, mode=None):
                if mode == 'datetime' else ['%d/%m/%Y', '%m/%d/%Y'])
     for fmt in formats:
         try:
+            # strptime reads the source date using fmt; strftime writes it
+            # in the target BigQuery format. Day-first formats are tried first.
             return datetime.datetime.strptime(str(value), fmt).strftime(target)
         except ValueError:
             pass
@@ -49,6 +77,8 @@ def format_value(value, mode=None):
 def resolve_target_column_indices(headers, names):
     result = set()
     for name in names:
+        # strip removes surrounding whitespace; lower ignores capitalization
+        # for matching only. This does not rename the Excel headers.
         matches = {i for i, value in enumerate(headers)
                    if value is not None and str(value).strip().lower() == name.strip().lower()}
         if not matches:
@@ -69,6 +99,8 @@ def csv_from_excel(file_info, specific_text='No filters applied', date_columns=(
     try:
         sheet = wb.active
         headers = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))
+        # Ignore surrounding whitespace/case when recognizing either comment
+        # suffix. Only these columns receive the free-text replacements above.
         comments = {i for i, value in enumerate(headers)
                     if value is not None and str(value).strip().upper().endswith(('_COMMENT', '_COMMENTS'))}
         dates = resolve_target_column_indices(headers, date_columns)
@@ -82,6 +114,8 @@ def csv_from_excel(file_info, specific_text='No filters applied', date_columns=(
                                          dir=os.path.dirname(output_path), delete=False) as output:
             temporary_output = output.name
             for row_number, values in enumerate(sheet.iter_rows(values_only=True), start=1):
+                # Trim the first cell for the filter-marker comparison only;
+                # the original value is still used when writing a normal row.
                 first = '' if values[0] is None else str(values[0]).strip()
                 if first.lower() == specific_text.lower():
                     continue
@@ -94,7 +128,12 @@ def csv_from_excel(file_info, specific_text='No filters applied', date_columns=(
                         text = sanitize_comment_value(text)
                         # Compare with the actual Excel cell, not a CSV-rendered copy.
                         # Preserve existing curly quotes and every ASCII quote one-for-one.
+                        # On a comparison copy, convert ASCII quotes one-for-one.
+                        # findall collects every straight/left-curly/right-curly
+                        # double quote in order; it does not edit the cell.
                         expected_quotes = re.findall(r'["\u201c\u201d]', original_text.replace('"', '\u201d'))
+                        # Collect the output quotes too, to detect any loss,
+                        # extra quotes, or change in the expected quote sequence.
                         actual_quotes = re.findall(r'["\u201c\u201d]', text)
                         if actual_quotes != expected_quotes:
                             cell = f'{sheet.title}!{openpyxl.utils.get_column_letter(i + 1)}{row_number}'
@@ -110,6 +149,8 @@ def csv_from_excel(file_info, specific_text='No filters applied', date_columns=(
                             'or explicitly enable cleanup for this column. Original file retained.'
                         )
                     fields.append(text)
+                # Insert || between fields; splitting it again must recover
+                # the exact same fields, or an embedded pipe caused ambiguity.
                 record = DELIMITER.join(fields)
                 if UNSAFE.search(record) or record.split(DELIMITER) != fields:
                     raise ValueError(f'Record validation failed at {sheet.title}, row {row_number}')
@@ -123,6 +164,8 @@ def csv_from_excel(file_info, specific_text='No filters applied', date_columns=(
                     pending_blank_rows = 0
                 output.write(record + '\n')
                 count += 1
+        # This replaces the output FILE after validation; it is unrelated
+        # to string replacement and does not change the file's contents.
         os.replace(temporary_output, output_path)
         temporary_output = None
         print(f'Processed file saved as: {output_path}; records: {count}')
@@ -138,7 +181,10 @@ def main(args):
     from google.cloud import storage
 
     pattern = re.compile(args.file_name)
+    # Split the argument at commas, trim each header name, and ignore empty
+    # entries. Example: ' JOIN_DATE, EXIT_DATE, ' becomes two column names.
     date_columns = [c.strip() for c in args.date_columns.split(',') if c.strip()]
+    # Apply the same comma-separated parsing to the datetime header list.
     datetime_columns = [c.strip() for c in args.datetime_columns.split(',') if c.strip()]
     landing_bucket = storage.Client(project=args.landing_project).bucket(args.landing_bucket)
     archive_bucket = storage.Client(project=args.staging_project).bucket(args.archive_bucket)
@@ -147,7 +193,9 @@ def main(args):
     for blob in landing_bucket.list_blobs(prefix='SFG_Generic/'):
         if not pattern.search(blob.name) or not blob.name.lower().endswith(('.xlsx', '.xlsm')):
             continue
+        # Take only the filename after the last / in the GCS object path.
         base = blob.name.rsplit('/', 1)[-1]
+        # Replace the filename extension with .csv; this does not edit data.
         output_name = os.path.splitext(base)[0] + '.csv'
         if output_name in output_names:
             raise ValueError(f'Multiple input files map to output {output_name}; no files processed.')
